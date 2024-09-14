@@ -6,8 +6,8 @@
     <include file="$(find caric_mission)/launch/run_mbs.launch" /> 
     <!-- <include file="$(find caric_mission)/launch/run_hangar.launch"/> -->
     <!-- <include file="$(find caric_mission)/launch/run_crane.launch"/> -->
-    <!--<include file="$(find caric_mission)/launch/single_uav.launch"/> --> 
-    <!-- <include file="$(find caric_mission)/launch/double_uav.launch"/> --> 
+    <!--<include file="$(find caric_mission)/launch/single_uav.launch"/> -->
+    <!-- <include file="$(find caric_mission)/launch/double_uav.launch"/> -->
 
     <!-- Central coordinator -->
     <node name="gcs_task" pkg="caric_baseline" output="screen" type="gcs_task"  />
