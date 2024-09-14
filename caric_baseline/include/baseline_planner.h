@@ -216,8 +216,7 @@ public:
         grid_size = grid_size_in;
         initial_the_convert();
         interval = floor(map_shape.z() / team_size);
-        cout << "Teamsize:"
-             << "team_size" << endl; // test
+        cout << "Teamsize:" << "team_size" << endl; // test
         for (int i = 1; i < Teamsize_in; i++)
         {
             region_slice_layer.push_back(i * interval);
@@ -225,6 +224,18 @@ public:
             finish_exp_flag.push_back(0);
         }
         set_under_ground_occupied();
+
+        // 初始化 interest_scanned
+        interest_scanned = vector<vector<vector<bool>>>(map_shape.x(),
+            vector<vector<bool>>(map_shape.y(),
+            vector<bool>(map_shape.z(), false))); // 初始化为 false
+        // 初始化兴趣点数量记录
+        interest_point_count = vector<vector<vector<int>>>(map_shape.x(),
+            vector<vector<int>>(map_shape.y(),
+            vector<int>(map_shape.z(), 0))); // 初始化为 0
+    }
+    Eigen::Vector3d get_grid_center_global(const Eigen::Vector3i &index) const {
+    return map_global_center + rotation_matrix * (index.cast<double>().cwiseProduct(grid_size) - grid_size / 2.0);
     }
 
     // Function use grid size to build map used in construct the global map
@@ -245,6 +256,15 @@ public:
         rotation_quat = Eigen::Quaterniond(rotation_matrix_inv);
         initial_the_convert();
         set_under_ground_occupied();
+
+        // 初始化 interest_scanned
+        interest_scanned = vector<vector<vector<bool>>>(map_shape.x(),
+            vector<vector<bool>>(map_shape.y(),
+            vector<bool>(map_shape.z(), false))); // 初始化为 false
+         // 初始化兴趣点数量记录
+        interest_point_count = vector<vector<vector<int>>>(map_shape.x(),
+            vector<vector<int>>(map_shape.y(),
+            vector<int>(map_shape.z(), 0))); // 初始化为 0
     }
 
     // Function for update the map and interest point
@@ -303,6 +323,13 @@ public:
             }
         }
         Eigen::Vector3i true_index = bias_index + map_index_center;
+
+        // 检查该点是否已经被扫描
+        if (interest_scanned[true_index.x()][true_index.y()][true_index.z()]) {
+            // 如果已扫描，则不再处理
+            return;
+        }
+
         if (map[true_index.x()][true_index.y()][true_index.z()] == 1)
         {
             return;
@@ -312,6 +339,11 @@ public:
             map[true_index.x()][true_index.y()][true_index.z()] = 1;
             occupied_num++;
             map_cloud_massage = point3i2str(true_index) + ";" + map_cloud_massage;
+
+            // 将这个点标记为已扫描
+            interest_scanned[true_index.x()][true_index.y()][true_index.z()] = true;
+            // 更新兴趣点数量
+            interest_point_count[true_index.x()][true_index.y()][true_index.z()]++;
             for (int x = true_index.x() - 1; x < true_index.x() + 2; x++)
             {
                 for (int y = true_index.y() - 1; y < true_index.y() + 2; y++)
@@ -339,6 +371,23 @@ public:
             return;
         }
     }
+    Eigen::Vector3i find_least_interested_point() {
+        int min_count = INT_MAX;
+        Eigen::Vector3i best_point(-1, -1, -1);
+
+        for (int x = 0; x < map_shape.x(); x++) {
+            for (int y = 0; y < map_shape.y(); y++) {
+                for (int z = 0; z < map_shape.z(); z++) {
+                    if (map[x][y][z] == 0 && interest_point_count[x][y][z] < min_count) {
+                        min_count = interest_point_count[x][y][z];
+                        best_point = Eigen::Vector3i(x, y, z);
+                    }
+                }
+            }
+        }
+        return best_point; // 返回兴趣点最少的地方
+    }
+
 
     visualization_msgs::MarkerArray Draw_map()
     {
@@ -450,6 +499,14 @@ public:
     void Astar_local(Eigen::Vector3d target, string myname, string leader_name, bool &flag, bool islong)
     {
         vector<vector<vector<int>>> map_temp = map;
+            // 检查是否准备返回
+        if (is_ready_to_return) { // 假设 is_ready_to_return 是一个标志位，表示无人机准备返回
+        // 使用兴趣点少的区域作为目标点
+        Eigen::Vector3i least_interested_point = find_least_interested_point();
+        if (least_interested_point != Eigen::Vector3i(-1, -1, -1)) {
+            target = get_grid_center_global(least_interested_point); // 更新目标为兴趣点少的区域
+        }
+        }
         if (myname == "/jurong" || myname == "/raffles")
         {
             if (true)
@@ -1220,6 +1277,8 @@ private:
     string map_cloud_massage;
     int occupied_num = 0;
     int exploration_state = 0;
+    vector<vector<vector<bool>>> interest_scanned; 
+    vector<vector<vector<int>>> interest_point_count; // 记录每个网格的兴趣点数量
     vector<vector<vector<int>>> map;
     vector<vector<vector<int>>> interest_map;
     vector<vector<vector<int>>> visited_map;
@@ -1249,6 +1308,9 @@ private:
     int height = 0;
     int interval = 0;
     bool finish_flag_leader = false;
+    bool is_returning = false; // 用于指示无人机是否准备返回
+    bool is_ready_to_return = false; // 用于指示无人机是否可以返回
+    Eigen::Vector3d takeoff_point; // 起飞点
     void initial_the_convert()
     {
         int x_lim;
@@ -1387,14 +1449,7 @@ private:
             return true;
         }
     }
-    // Function to get the grid center point in global
-    Eigen::Vector3d get_grid_center_global(Eigen::Vector3i grid_index)
-    {
-        Eigen::Vector3d bias = (grid_index - map_index_center).cast<double>();
-        Eigen::Vector3d local_result = bias.cwiseProduct(grid_size);
-        Eigen::Vector3d global_result = rotation_matrix_inv * local_result + map_global_center;
-        return global_result;
-    }
+
     // Function to generate map marker
     visualization_msgs::Marker generate_marker(Eigen::Vector3i index, int type, int id)
     {
@@ -1607,7 +1662,6 @@ private:
         q.push({start});
         vector<vector<vector<bool>>> visited(map_shape.x(), vector<vector<bool>>(map_shape.y(), vector<bool>(map_shape.z(), false)));
         visited[start.x()][start.y()][start.z()] = true;
-
         while (!q.empty())
         {
             list<Eigen::Vector3i> path = q.front();
@@ -1899,7 +1953,8 @@ class mainbrain
 public:
     mainbrain() {}
     mainbrain(string str, string name)
-    {
+    {   
+        prev_gimbal_position = Eigen::Vector3d::Zero();
         drone_rotation_matrix = Eigen::Matrix3d::Identity();
         grid_size = Eigen::Vector3d(safe_distance, safe_distance, safe_distance);
         global_map = grid_map(grid_size);
@@ -2017,122 +2072,102 @@ public:
         }
         odom_get = true;
     }
-    
+         
     void replan()
     {
         if (!finish_init)
         {
             return;
         }
-        if (map_set.size() == now_id && is_transfer)
+
+        if ((now_gimbal_position - prev_gimbal_position).norm() > 0.1)
         {
-            // fly home
-            if (is_leader)
-            {   
-                state = 0;
-                bool flag = false;
-                global_map.Astar_local(initial_position, namespace_, info_mannager.get_leader(), flag, true);
-                get_way_point = update_target_waypoint();
-                path_show = global_map.get_path_show();
-                if (flag)
-                {
-                    initial_position.z()= initial_position.z()+2;
-                }
-                return;
+            // Keep the drone still
+            target_position = now_global_position;
+            get_way_point = true;
+            prev_gimbal_position = now_gimbal_position;
+            return;
+        }
+        
+        if (is_returning)
+        {
+            // If we're returning, we don't replan tasks, just follow the path to the takeoff point
+            bool flag = false;
+            global_map.Astar_local(takeoff_point, namespace_, info_mannager.get_leader(), flag, true);
+            if (flag) {
+                std::cout << "No path found for returning to takeoff point." << std::endl;
+                return; // Handle no path scenario
+            } else {
+                // Update the current state and waypoints
+                update_target_waypoint(); // Update target waypoints based on the new path
             }
-            else
+        }
+        else
+        {
+            if (map_set.size() == now_id && is_transfer)
             {
-                state = 0;
-                if (state == 0)
+                if (is_leader)
                 {
-                    is_transfer = true;
-                    if (info_mannager.get_leader_state() == 0 && !not_delete)
-                    {
-                        not_delete = true;
-                    }
-                }
-                if (now_global_position.z() < 8)
-                {
-                    bool flag = false;
-
-                    global_map.Astar_local(initial_position, namespace_, info_mannager.get_leader(), flag, false);
+                    state = 0;
+                    bool flag = false; // Flag for whether the path planning was successful
+                    global_map.Astar_local(initial_position, namespace_, info_mannager.get_leader(), flag, true);
+                    get_way_point = update_target_waypoint(); // Update target waypoint
+                    path_show = global_map.get_path_show(); // Get the path to show
                     if (flag)
                     {
-                        global_map.Astar_local(initial_position, namespace_, info_mannager.get_leader(), flag, true);
+                        initial_position.z() += 2; // Adjust height if path planning fails
                     }
-                    get_way_point = update_target_waypoint();
-                    path_show = global_map.get_path_show();
-                    if (flag)
-                    {
-                        initial_position.z() += 1;
-                    }
-
                     return;
                 }
                 else
                 {
-                    Eigen::Vector3d target;
-                    info_mannager.get_leader_position(target);
-
-                    bool flag = false;
-                    global_map.Astar_local(target, namespace_, info_mannager.get_leader(), flag, false);
-                    // if (flag)
-                    // {
-                    //     global_map.Astar_local(initial_position, namespace_, info_mannager.get_leader(), flag, true);
-                    // }
-                    get_way_point = update_target_waypoint();
-                    path_show = global_map.get_path_show();
-
-                    return;
-                }
-            }
-        }
-        else if (finish_init && is_transfer)
-        {
-            if (namespace_ == "/jurong" || namespace_ == "/raffles")
-            {
-               ////yolo();
-                Eigen::Vector3d target = map_set[now_id].get_fly_in_point_global();
-                bool flag = false;
-                global_map.Astar_local(target, namespace_, info_mannager.get_leader(), flag, false);
-                get_way_point = update_target_waypoint();
-                path_show = global_map.get_path_show();
-                map_set[now_id].update_fly_in_index(flag);
-                is_transfer = !map_set[now_id].check_whether_fly_in(false);
-                if (!is_transfer)
-                {
-                    map_set[now_id].set_state(1);
-                    state = map_set[now_id].get_state();
-                }
-               ////yolo();
-            }
-            else
-            {
-                if (state == 0)
-                {
-                    is_transfer = true;
-                    if (info_mannager.get_leader_state() == 0 && !not_delete)
+                    state = 0;
+                    if (state == 0)
                     {
-                        not_delete = true;
+                        is_transfer = true;
+                        if (info_mannager.get_leader_state() == 0 && !not_delete)
+                        {
+                            not_delete = true;
+                        }
+                    }
+                    if (now_global_position.z() < 8)
+                    {
+                        bool flag = false;
+                        global_map.Astar_local(initial_position, namespace_, info_mannager.get_leader(), flag, false);
+                        if (flag)
+                        {
+                            global_map.Astar_local(initial_position, namespace_, info_mannager.get_leader(), flag, true);
+                        }
+                        get_way_point = update_target_waypoint();
+                        path_show = global_map.get_path_show();
+                        if (flag)
+                        {
+                            initial_position.z() += 1; // Adjust height
+                        }
+                        return;
+                    }
+                    else
+                    {
+                        Eigen::Vector3d target;
+                        info_mannager.get_leader_position(target);
+                        bool flag = false;
+                        global_map.Astar_local(target, namespace_, info_mannager.get_leader(), flag, false);
+                        get_way_point = update_target_waypoint();
+                        path_show = global_map.get_path_show();
+                        return;
                     }
                 }
-                if (info_mannager.get_leader_state() == 0)
-                {
-                    Eigen::Vector3d target;
-                    info_mannager.get_leader_position(target);
-                    bool flag = false;
-                    global_map.Astar_local(target, namespace_, info_mannager.get_leader(), flag, false);
-                    get_way_point = update_target_waypoint();
-                    path_show = global_map.get_path_show();
-                    return;
-                }
-                else if (state == 1)
+            }
+            else if (finish_init && is_transfer)
+            {
+                if (namespace_ == "/jurong" || namespace_ == "/raffles")
                 {
                     Eigen::Vector3d target = map_set[now_id].get_fly_in_point_global();
                     bool flag = false;
-                    global_map.Astar_photo(target, namespace_, flag);
+                    global_map.Astar_local(target, namespace_, info_mannager.get_leader(), flag, false);
                     get_way_point = update_target_waypoint();
                     path_show = global_map.get_path_show();
+                    map_set[now_id].update_fly_in_index(flag);
                     is_transfer = !map_set[now_id].check_whether_fly_in(false);
                     if (!is_transfer)
                     {
@@ -2143,63 +2178,91 @@ public:
                 }
                 else
                 {
-                    Eigen::Vector3d target = map_set[now_id].get_fly_in_point_global();
-                    bool flag = false;
-                    global_map.Astar_photo(target, namespace_, flag);
-                    get_way_point = update_target_waypoint();
-                    path_show = global_map.get_path_show();
-                    return;
-                    // bool flag = false;
-                    // global_map.Astar_photo(now_global_position, namespace_, flag);
-                    // get_way_point = update_target_waypoint();
-                    // path_show = global_map.get_path_show();
-                    // return;
-
-                }
-            }
-        }
-        else
-        {
-            if (namespace_ == "/jurong" || namespace_ == "/raffles")
-            {
-               ////yolo();
-                state = map_set[now_id].get_state_leader();
-                map_set[now_id].exploration(namespace_);
-                path_show = map_set[now_id].get_path_show();
-                get_way_point = update_target_waypoint();
-               ////yolo();
-                if (map_set[now_id].get_whether_pop())
-                {
-                    now_id++;
-                    state = 0;
-                    is_transfer = true;
-                    return;
+                    if (state == 0)
+                    {
+                        is_transfer = true;
+                        if (info_mannager.get_leader_state() == 0 && !not_delete)
+                        {
+                            not_delete = true;
+                        }
+                    }
+                    if (info_mannager.get_leader_state() == 0)
+                    {
+                        Eigen::Vector3d target;
+                        info_mannager.get_leader_position(target);
+                        bool flag = false;
+                        global_map.Astar_local(target, namespace_, info_mannager.get_leader(), flag, false);
+                        get_way_point = update_target_waypoint();
+                        path_show = global_map.get_path_show();
+                        return;
+                    }
+                    else if (state == 1)
+                    {
+                        Eigen::Vector3d target = map_set[now_id].get_fly_in_point_global();
+                        bool flag = false;
+                        global_map.Astar_photo(target, namespace_, flag);
+                        get_way_point = update_target_waypoint();
+                        path_show = global_map.get_path_show();
+                        is_transfer = !map_set[now_id].check_whether_fly_in(false);
+                        if (!is_transfer)
+                        {
+                            map_set[now_id].set_state(1);
+                            state = map_set[now_id].get_state();
+                        }
+                        return;
+                    }
+                    else
+                    {
+                        Eigen::Vector3d target = map_set[now_id].get_fly_in_point_global();
+                        bool flag = false;
+                        global_map.Astar_photo(target, namespace_, flag);
+                        get_way_point = update_target_waypoint();
+                        path_show = global_map.get_path_show();
+                        return;
+                    }
                 }
             }
             else
             {
-                if (map_set.size() > now_id)
+                if (namespace_ == "/jurong" || namespace_ == "/raffles")
                 {
-                    state = map_set[now_id].get_state();
-                }
-                else
-                {
-                    state = 0;
-                }
-                if (state == 0)
-                {
-                    is_transfer = true;
-                    return;
-                }
-                if (map_set.size() > now_id)
-                {
-                    map_set[now_id].take_photo(namespace_);
+                    state = map_set[now_id].get_state_leader();
+                    map_set[now_id].exploration(namespace_);
                     path_show = map_set[now_id].get_path_show();
                     get_way_point = update_target_waypoint();
+                    if (map_set[now_id].get_whether_pop())
+                    {
+                        now_id++;
+                        state = 0;
+                        is_transfer = true;
+                        return;
+                    }
                 }
                 else
                 {
-                    get_way_point = update_target_waypoint();
+                    if (map_set.size() > now_id)
+                    {
+                        state = map_set[now_id].get_state();
+                    }
+                    else
+                    {
+                        state = 0;
+                    }
+                    if (state == 0)
+                    {
+                        is_transfer = true;
+                        return;
+                    }
+                    if (map_set.size() > now_id)
+                    {
+                        map_set[now_id].take_photo(namespace_);
+                        path_show = map_set[now_id].get_path_show();
+                        get_way_point = update_target_waypoint();
+                    }
+                    else
+                    {
+                        get_way_point = update_target_waypoint();
+                    }
                 }
             }
         }
@@ -2278,13 +2341,15 @@ public:
             return map_set[now_id].Draw_map();
         }
     }
+    
     nav_msgs::Path Draw_Path()
     {
         path_show.header.frame_id = "world";
         return path_show;
     }
-    // communication part
-    bool get_position_plan_msg(string &msg)
+
+    // Communication part
+    bool get_position_plan_msg(std::string &msg)
     {
         if (!odom_get || !finish_init)
         {
@@ -2302,40 +2367,43 @@ public:
         }
     }
 
-    bool get_global_massage(string &msg)
+    bool get_global_massage(std::string &msg)
     {
         if (!is_leader || !finish_init)
         {
             return false;
         }
-        msg = "mapglobal;" + to_string(Teamid) + ";" + global_map.get_num_str() + global_map.get_map_str();
+        msg = "mapglobal;" + std::to_string(Teamid) + ";" + global_map.get_num_str() + global_map.get_map_str();
         return true;
     }
-    bool get_local_massage(string &msg)
+
+    bool get_local_massage(std::string &msg)
     {
         if (!is_leader || !finish_init || state >= 2 || map_set.size() == now_id)
         {
             return false;
         }
-        msg = "map;" + to_string(Teamid) + ';' + map_set[now_id].get_num_str() + map_set[now_id].get_map_str();
+        msg = "map;" + std::to_string(Teamid) + ';' + map_set[now_id].get_num_str() + map_set[now_id].get_map_str();
         return true;
     }
-    bool get_fly_in_massage(string &msg)
+
+    bool get_fly_in_massage(std::string &msg)
     {
         if (!is_leader || !finish_init || map_set.size() == now_id)
         {
             return false;
         }
-        msg = "flyin;" + to_string(Teamid) + ';' + map_set[now_id].get_fly_in_str();
+        msg = "flyin;" + std::to_string(Teamid) + ';' + map_set[now_id].get_fly_in_str();
         return true;
     }
-    bool get_state_set_msg_list(list<string> &string_list)
+
+    bool get_state_set_msg_list(std::list<std::string> &string_list)
     {
         if (!is_leader || !finish_init || map_set.size() == now_id)
         {
             return false;
         }
-        list<string> string_list_tamp = map_set[now_id].get_state_string_list();
+        std::list<std::string> string_list_tamp = map_set[now_id].get_state_string_list();
         if (string_list_tamp.empty())
         {
             return false;
@@ -2344,30 +2412,31 @@ public:
         {
             for (auto &str : string_list_tamp)
             {
-                string_list.push_back("state_set;" + to_string(Teamid) + ";" + str);
+                string_list.push_back("state_set;" + std::to_string(Teamid) + ";" + str);
             }
             return true;
         }
     }
-    bool get_state_massage(string &msg)
+
+    bool get_state_massage(std::string &msg)
     {
         if (!finish_init)
         {
             return false;
         }
-        msg = "state;" + namespace_ + ";" + to_string(state) + ";";
+        msg = "state;" + namespace_ + ";" + std::to_string(state) + ";";
         return true;
     }
 
-    void communicate(string str)
+    void communicate(std::string str)
     {
         if (!finish_init)
         {
             return;
         }
 
-        istringstream msg_stream(str);
-        string topic;
+        std::istringstream msg_stream(str);
+        std::string topic;
         getline(msg_stream, topic, ';');
 
         if (topic == "position")
@@ -2376,8 +2445,8 @@ public:
             {
                 return;
             }
-            istringstream global_po_str(str);
-            istringstream local_po_str(str);
+            std::istringstream global_po_str(str);
+            std::istringstream local_po_str(str);
             getline(global_po_str, topic, ';');
             getline(local_po_str, topic, ';');
             info_mannager.reset_position_path(msg_stream);
@@ -2390,14 +2459,13 @@ public:
             {
                 global_map.update_local_dict(global_po_str);
             }
-
             return;
         }
         else if (topic == "state")
         {
-            string orin;
+            std::string orin;
             getline(msg_stream, orin, ';');
-            string state_str;
+            std::string state_str;
             getline(msg_stream, state_str, ';');
             if (map_set.size() > now_id)
             {
@@ -2414,12 +2482,11 @@ public:
                 }
                 catch (const std::invalid_argument &e)
                 {
-
-                    cout << "Invalid argument" << e.what() << endl;
+                    std::cout << "Invalid argument" << e.what() << std::endl;
                 }
                 catch (const std::out_of_range &e)
                 {
-                    cout << "Out of range" << e.what() << endl;
+                    std::cout << "Out of range" << e.what() << std::endl;
                 }
             }
             else
@@ -2430,18 +2497,18 @@ public:
                 }
                 catch (const std::invalid_argument &e)
                 {
-                    cout << "Invalid argument" << e.what() << endl;
+                    std::cout << "Invalid argument" << e.what() << std::endl;
                 }
                 catch (const std::out_of_range &e)
                 {
-                    cout << "Out of range" << e.what() << endl;
+                    std::cout << "Out of range" << e.what() << std::endl;
                 }
                 return;
             }
         }
         else if (topic == "state_set")
         {
-            string target_team;
+            std::string target_team;
             if (not_delete == false || (!is_leader && state == 2 || map_set.size() == now_id))
             {
                 return;
@@ -2449,11 +2516,11 @@ public:
             getline(msg_stream, target_team, ';');
             if (stoi(target_team) == Teamid)
             {
-                string target_name;
+                std::string target_name;
                 getline(msg_stream, target_name, ';');
                 if (namespace_ == target_name)
                 {
-                    string state_str;
+                    std::string state_str;
                     getline(msg_stream, state_str, ';');
                     state = stoi(state_str);
                     return;
@@ -2474,12 +2541,11 @@ public:
             {
                 return;
             }
-            string target_team;
+            std::string target_team;
             getline(msg_stream, target_team, ';');
-            // cout<<"target team:"<<target_team<<endl;
             if (stoi(target_team) == Teamid)
             {
-                // insert map_front from string
+                // Insert map front from string
                 if (map_set.size() > now_id)
                 {
                     map_set[now_id].insert_cloud_from_str(msg_stream);
@@ -2496,7 +2562,7 @@ public:
         }
         else if (topic == "mapglobal")
         {
-            string target_team;
+            std::string target_team;
             if (not_delete == false || (!is_leader && state == 2))
             {
                 return;
@@ -2515,12 +2581,12 @@ public:
         }
         else if (topic == "visit")
         {
-            string target_team;
+            std::string target_team;
             getline(msg_stream, target_team, ';');
             if (stoi(target_team) == Teamid)
             {
-                // insert map_front from string
-                // not develop this function now
+                // Insert map front from string
+                // Not develop this function now
             }
             else
             {
@@ -2531,17 +2597,16 @@ public:
         {
             if (not_delete == false || (!is_leader && state == 2) || map_set.size() == now_id)
             {
-
                 return;
             }
-            string target_team;
+            std::string target_team;
             getline(msg_stream, target_team, ';');
             if (stoi(target_team) == Teamid)
             {
                 if (map_set.size() >= now_id)
                 {
-                    // insert fly_in_index
-                    string fly_in_index;
+                    // Insert fly_in_index
+                    std::string fly_in_index;
                     getline(msg_stream, fly_in_index, ';');
                     map_set[now_id].set_fly_in_index(fly_in_index);
                 }
@@ -2552,13 +2617,13 @@ public:
             }
             else
             {
-
                 return;
             }
         }
     }
 
 private:
+    // State and configuration variables
     int now_id = 0;
     int map_set_use = 0;
     int state = 0;
@@ -2566,24 +2631,28 @@ private:
     bool is_planned = false;
     Eigen::Vector3d planning_point;
     Eigen::Vector3d initial_position;
+    bool is_returning; // 用于指示无人机是否准备返回
+    Eigen::Vector3d takeoff_point; // 起飞点
+    Eigen::Vector3d prev_gimbal_position;
+    bool is_gimbal_moving = false; // Track if the gimbal is moving
     bool is_leader = false;
-    vector<grid_map> map_set;
+    std::vector<grid_map> map_set;
     grid_map global_map;
 
     int lowest_bound = 0;
     int highest_bound = 0;
 
     Eigen::Vector3d grid_size;
-    vector<int> path_index;
+    std::vector<int> path_index;
     double safe_distance = 2.5;
     bool finish_init = false;
     bool odom_get = false;
-    string namespace_;
+    std::string namespace_;
     int Teamid;
     info_agent info_mannager;
     Eigen::Vector3d now_global_position;
-    list<Eigen::Vector3i> global_index_path;
-    list<Eigen::Vector3d> global_path;
+    std::list<Eigen::Vector3i> global_index_path;
+    std::list<Eigen::Vector3d> global_path;
     Eigen::Vector3d now_gimbal_position;
     nav_msgs::Path path_show;
     Eigen::Matrix3d gimbal_rotation_matrix;
@@ -2594,10 +2663,11 @@ private:
     Eigen::Vector3d target_position;
     bool get_way_point = false;
     bool finish_first_planning = false;
-    vector<string> teammates_name;
-    void generate_global_map(string s)
+    std::vector<std::string> teammates_name;
+
+    void generate_global_map(const std::string &s)
     {
-        vector<string> spilited_str;
+        std::vector<std::string> spilited_str;
         std::istringstream iss(s);
         std::string substring;
         while (std::getline(iss, substring, ','))
@@ -2606,8 +2676,10 @@ private:
         }
         Eigen::Vector3d max_region(stod(spilited_str[3]), stod(spilited_str[4]), stod(spilited_str[5]));
         Eigen::Vector3d min_region(stod(spilited_str[0]), stod(spilited_str[1]), stod(spilited_str[2]));
-        vector<vector<string>> teams(2);
-        vector<int> size_of_path(2);
+        std::vector<std::vector<std::string>> teams(2);
+        std::vector<int> size_of_path(2);
+        
+        // Parsing the team and path size information
         for (int i = 6; i < spilited_str.size(); i++)
         {
             if (spilited_str[i] == "team")
@@ -2616,34 +2688,39 @@ private:
                 {
                     teams[stoi(spilited_str[i + 1])].push_back(spilited_str[j]);
                 }
-                i = i + 2 + stoi(spilited_str[i + 2]);
+                i += 2 + stoi(spilited_str[i + 2]);
                 continue;
             }
             if (spilited_str[i] == "path_size")
             {
                 size_of_path[stoi(spilited_str[i + 1])] = stoi(spilited_str[i + 2]);
-                i = i + 2;
+                i += 2;
                 continue;
             }
         }
+
+        // Determine Team ID
         for (int i = 0; i < 2; i++)
         {
-            for (int j = 0; j < teams[i].size(); j++)
+            for (const auto &team_name : teams[i])
             {
-                if ("/" + teams[i][j] == namespace_)
+                if ("/" + team_name == namespace_)
                 {
                     Teamid = i;
                     break;
                 }
             }
         }
-        cout << "TeamID:" << Teamid << endl;
+
+        std::cout << "TeamID: " << Teamid << std::endl;
+
+        // Assign paths based on team ID
         if (Teamid == 0)
         {
             for (int i = 0; i < size_of_path[0]; i++)
             {
                 path_index.push_back(i + 1);
-                cout << i + 1 << endl;
+                std::cout << i + 1 << std::endl;
             }
             teammates_name = teams[Teamid];
         }
@@ -2652,12 +2729,13 @@ private:
             for (int i = 0; i < size_of_path[1]; i++)
             {
                 path_index.push_back(i + 1 + size_of_path[0]);
-                cout << i + 1 + size_of_path[0] << endl;
+                std::cout << i + 1 + size_of_path[0] << std::endl;
             }
             teammates_name = teams[Teamid];
         }
         info_mannager = info_agent(teammates_name);
     }
+
     void insert_point(Eigen::Vector3d point_in)
     {
         if (map_set.size() > now_id)
@@ -2673,27 +2751,25 @@ private:
             global_map.insert_point(point_in);
         }
     }
-    bool is_Nbr(Eigen::Vector3d test, vector<Eigen::Vector3d> Nbr_point)
+
+    bool is_Nbr(Eigen::Vector3d test, const std::vector<Eigen::Vector3d> &Nbr_point)
     {
-        if (Nbr_point.size() == 0)
+        if (Nbr_point.empty())
         {
             return false;
         }
-        else
+        Eigen::Vector3d collision_box_size = grid_size;
+        for (const auto &Nbr : Nbr_point)
         {
-            Eigen::Vector3d collision_box_size = grid_size;
-            for (int i = 0; i < Nbr_point.size(); i++)
+            Eigen::Vector3d diff = Nbr - test;
+            if (fabs(diff[0]) <= collision_box_size[0] && fabs(diff[1]) <= collision_box_size[1] && fabs(diff[2]) <= collision_box_size[2])
             {
-                Eigen::Vector3d Nbr = Nbr_point[i];
-                Eigen::Vector3d diff = Nbr - test;
-                if (fabs(diff[0]) <= collision_box_size[0] && fabs(diff[1]) <= collision_box_size[1] && fabs(diff[2]) <= collision_box_size[2])
-                {
-                    return true;
-                }
+                return true; // Collision detected
             }
-            return false;
         }
+        return false; // No collision
     }
+
     trajectory_msgs::MultiDOFJointTrajectory position_msg_build(Eigen::Vector3d position, Eigen::Vector3d target, double target_yaw)
     {
         is_planned = true;
@@ -2702,6 +2778,7 @@ private:
         {
             target_yaw = 0;
         }
+
         trajectory_msgs::MultiDOFJointTrajectory trajset_msg;
         trajectory_msgs::MultiDOFJointTrajectoryPoint trajpt_msg;
         trajset_msg.header.frame_id = "world";
@@ -2734,7 +2811,6 @@ private:
         transform_msg.rotation.w = cosf(target_yaw * 0.5);
 
         trajpt_msg.transforms.push_back(transform_msg);
-
         accel_msg.linear.x = 0;
         accel_msg.linear.y = 0;
         accel_msg.linear.z = 0;
@@ -2742,38 +2818,40 @@ private:
         trajpt_msg.velocities.push_back(vel_msg);
         trajpt_msg.accelerations.push_back(accel_msg);
         trajset_msg.points.push_back(trajpt_msg);
-
-        trajset_msg.header.frame_id = "world";
+        
         return trajset_msg;
     }
+
     geometry_msgs::Twist gimbal_msg_build(Eigen::Vector3d target_euler_rpy)
     {
         geometry_msgs::Twist gimbal_msg;
-        gimbal_msg.linear.x = 1.0; // setting linear.x to -1.0 enables velocity control mode.
+        gimbal_msg.linear.x = 1.0; // Setting linear.x to 1.0 enables velocity control mode.
+        
         if (fabs(target_euler_rpy.z()) < M_PI / 2)
         {
-            gimbal_msg.linear.y = target_euler_rpy.y(); // if linear.x set to 1.0, linear,y and linear.z are the
-            gimbal_msg.linear.z = target_euler_rpy.z(); // target pitch and yaw angle, respectively.
+            gimbal_msg.linear.y = target_euler_rpy.y(); // Target pitch angle
+            gimbal_msg.linear.z = target_euler_rpy.z(); // Target yaw angle
         }
         else
         {
-            gimbal_msg.linear.y = target_euler_rpy.y(); // if linear.x set to 1.0, linear,y and linear.z are the
-            gimbal_msg.linear.z = 0;                    // target pitch and yaw angle, respectively.
+            gimbal_msg.linear.y = target_euler_rpy.y();
+            gimbal_msg.linear.z = 0; // Limit yaw angle
         }
         gimbal_msg.angular.x = 0.0;
-        gimbal_msg.angular.y = 0.0; // in velocity control mode, this is the target pitch velocity
-        gimbal_msg.angular.z = 0.0; // in velocity control mode, this is the target yaw velocity
+        gimbal_msg.angular.y = 0.0; // Target pitch velocity
+        gimbal_msg.angular.z = 0.0; // Target yaw velocity
         return gimbal_msg;
     }
+
     Eigen::Matrix3d Rpy2Rot(Eigen::Vector3d rpy)
     {
-        Eigen::Matrix3d result = Eigen::Matrix3d::Identity();
-        result = Eigen::AngleAxisd(rpy.z(), Eigen::Vector3d::UnitZ()).toRotationMatrix() * Eigen::AngleAxisd(rpy.y(), Eigen::Vector3d::UnitY()).toRotationMatrix() * Eigen::AngleAxisd(rpy.x(), Eigen::Vector3d::UnitX()).toRotationMatrix();
-        return result;
+        return Eigen::AngleAxisd(rpy.z(), Eigen::Vector3d::UnitZ()).toRotationMatrix() *
+               Eigen::AngleAxisd(rpy.y(), Eigen::Vector3d::UnitY()).toRotationMatrix() *
+               Eigen::AngleAxisd(rpy.x(), Eigen::Vector3d::UnitX()).toRotationMatrix();
     }
+
     Eigen::Vector3d Rot2rpy(Eigen::Matrix3d R)
     {
-
         Eigen::Vector3d n = R.col(0);
         Eigen::Vector3d o = R.col(1);
         Eigen::Vector3d a = R.col(2);
@@ -2788,24 +2866,20 @@ private:
 
         return rpy;
     }
-    string point2str(Eigen::Vector3d point)
+
+    std::string point2str(Eigen::Vector3d point)
     {
-        string result;
-        result = to_string(point.x()) + "," + to_string(point.y()) + "," + to_string(point.z());
-        return result;
+        return std::to_string(point.x()) + "," + std::to_string(point.y()) + "," + std::to_string(point.z());
     }
-    Eigen::Vector3d str2point(string input)
+
+    Eigen::Vector3d str2point(const std::string &input)
     {
         Eigen::Vector3d result;
-        std::vector<string> value;
+        std::vector<std::string> value;
         boost::split(value, input, boost::is_any_of(","));
         if (value.size() == 3)
         {
             result = Eigen::Vector3d(stod(value[0]), stod(value[1]), stod(value[2]));
-        }
-        else
-        {
-            cout << "error use str2point 1" << endl;
         }
         return result;
     }
@@ -2815,20 +2889,19 @@ class Agent
 {
 public:
     Agent(ros::NodeHandlePtr &nh_ptr_)
-    : nh_ptr(nh_ptr_)
+        : nh_ptr(nh_ptr_), map_initialise(false), communication_initialise(false)
     {
-
         TimerProbeNbr = nh_ptr->createTimer(ros::Duration(1.0 / 10.0), &Agent::TimerProbeNbrCB, this);
-        TimerPlan     = nh_ptr->createTimer(ros::Duration(1.0 / 2.0),  &Agent::TimerPlanCB,     this);
-        TimerCmdOut   = nh_ptr->createTimer(ros::Duration(1.0 / 10.0), &Agent::TimerCmdOutCB,   this);
-        TimerViz      = nh_ptr->createTimer(ros::Duration(1.0 / 1.0),  &Agent::TimerVizCB,      this);
+        TimerPlan = nh_ptr->createTimer(ros::Duration(1.0 / 2.0), &Agent::TimerPlanCB, this);
+        TimerCmdOut = nh_ptr->createTimer(ros::Duration(1.0 / 10.0), &Agent::TimerCmdOutCB, this);
+        TimerViz = nh_ptr->createTimer(ros::Duration(1.0 / 1.0), &Agent::TimerVizCB, this);
 
         task_sub_ = nh_ptr->subscribe("/task_assign" + nh_ptr->getNamespace(), 10, &Agent::TaskCallback, this);
-        com_sub_  = nh_ptr->subscribe("/broadcast" + nh_ptr->getNamespace(), 10, &Agent::ComCallback, this);
-        client    = nh_ptr->serviceClient<caric_mission::CreatePPComTopic>("/create_ppcom_topic");
+        com_sub_ = nh_ptr->subscribe("/broadcast" + nh_ptr->getNamespace(), 10, &Agent::ComCallback, this);
+        client = nh_ptr->serviceClient<caric_mission::CreatePPComTopic>("/create_ppcom_topic");
         communication_pub_ = nh_ptr->advertise<std_msgs::String>("/broadcast", 10);
 
-        string str = nh_ptr->getNamespace();
+        std::string str = nh_ptr->getNamespace();
         str.erase(0, 1);
         srv.request.source = str;
         srv.request.targets.push_back("all");
@@ -2839,44 +2912,43 @@ public:
         {
             serviceAvailable = ros::service::waitForService("/create_ppcom_topic", ros::Duration(10.0));
         }
-        string result = "Begin";
+        std::string result = "Begin";
         while (result != "success lah!")
         {
             client.call(srv);
             result = srv.response.result;
             printf(KYEL "%s\n" RESET, result.c_str());
-            std::this_thread::sleep_for(chrono::milliseconds(1000));
+            std::this_thread::sleep_for(std::chrono::milliseconds(1000));
         }
         communication_initialise = true;
 
-        odom_sub_        = nh_ptr->subscribe("/ground_truth/odometry", 10, &Agent::OdomCallback, this);
-        gimbal_sub_      = nh_ptr->subscribe("/firefly/gimbal", 10, &Agent::GimbalCallback, this);
+        odom_sub_ = nh_ptr->subscribe("/ground_truth/odometry", 10, &Agent::OdomCallback, this);
+        gimbal_sub_ = nh_ptr->subscribe("/firefly/gimbal", 10, &Agent::GimbalCallback, this);
 
-        cloud_sub_       = new message_filters::Subscriber<sensor_msgs::PointCloud2>(*nh_ptr, "/cloud_inW", 10);
-        nbr_sub_         = new message_filters::Subscriber<sensor_msgs::PointCloud2>(*nh_ptr, "/nbr_odom_cloud", 10);
+        cloud_sub_ = new message_filters::Subscriber<sensor_msgs::PointCloud2>(*nh_ptr, "/cloud_inW", 10);
+        nbr_sub_ = new message_filters::Subscriber<sensor_msgs::PointCloud2>(*nh_ptr, "/nbr_odom_cloud", 10);
         odom_filter_sub_ = new message_filters::Subscriber<nav_msgs::Odometry>(*nh_ptr, "/ground_truth/odometry", 10);
-        sync_            = new message_filters::Synchronizer<MySyncPolicy>(MySyncPolicy(10), *cloud_sub_, *nbr_sub_, *odom_filter_sub_);
+        sync_ = new message_filters::Synchronizer<MySyncPolicy>(MySyncPolicy(10), *cloud_sub_, *nbr_sub_, *odom_filter_sub_);
 
         sync_->registerCallback(boost::bind(&Agent::MapCallback, this, _1, _2, _3));
 
-        motion_pub_     = nh_ptr->advertise<trajectory_msgs::MultiDOFJointTrajectory>("/firefly/command/trajectory", 1);
-        gimbal_pub_     = nh_ptr->advertise<geometry_msgs::Twist>("/firefly/command/gimbal", 1);
+        motion_pub_ = nh_ptr->advertise<trajectory_msgs::MultiDOFJointTrajectory>("/firefly/command/trajectory", 1);
+        gimbal_pub_ = nh_ptr->advertise<geometry_msgs::Twist>("/firefly/command/gimbal", 1);
 
         map_marker_pub_ = nh_ptr->advertise<visualization_msgs::MarkerArray>("/firefly/map", 1);
-        path_pub_       = nh_ptr->advertise<nav_msgs::Path>("/firefly/path_show", 10);
+        path_pub_ = nh_ptr->advertise<nav_msgs::Path>("/firefly/path_show", 10);
     }
 
     void MapCallback(const sensor_msgs::PointCloud2ConstPtr &cloud,
                      const sensor_msgs::PointCloud2ConstPtr &Nbr,
                      const nav_msgs::OdometryConstPtr &msg)
     {
-
-        // ensure the map initialization finished
+        // Ensure the map initialization finished
         if (!map_initialise)
         {
             return;
         }
-        // ensure time of messages sync
+        // Ensure time of messages sync
         if (std::fabs(cloud->header.stamp.toSec() - Nbr->header.stamp.toSec()) > 0.2)
         {
             return;
@@ -2885,56 +2957,54 @@ public:
     }
 
 private:
-    ros::NodeHandlePtr nh_ptr;  // nodehandle for communication
+    ros::NodeHandlePtr nh_ptr;  // Node handle for communication
 
     ros::Timer TimerProbeNbr;   // To request updates from neighbours
     ros::Timer TimerPlan;       // To design a trajectory
     ros::Timer TimerCmdOut;     // To issue control setpoint to unicon
-    ros::Timer TimerViz;        // To vizualize internal states
+    ros::Timer TimerViz;        // To visualize internal states
 
-    // callback Q1
-    caric_mission::CreatePPComTopic srv; // This PPcom create for communication between neibors;
+    // Callback Q1
+    caric_mission::CreatePPComTopic srv; // This PPcom create for communication between neighbours
     ros::ServiceClient client;           // The client to create ppcom
     ros::Publisher communication_pub_;   // PPcom publish com
-    bool serviceAvailable = false;       // The flag whether the communication service is ready
+    bool serviceAvailable = false;       // Flag whether the communication service is ready
     ros::Subscriber task_sub_;
     ros::Subscriber com_sub_;
-    string pre_task;
+    std::string pre_task;
 
-    // callback Q2
-    ros::Subscriber odom_sub_;   // Get neibor_info update
-    ros::Subscriber gimbal_sub_; // Get gimbal info update;
-    // callback Q3
+    // Callback Q2
+    ros::Subscriber odom_sub_;   // Get neighbour info update
+    ros::Subscriber gimbal_sub_; // Get gimbal info update
+
+    // Callback Q3
     message_filters::Subscriber<sensor_msgs::PointCloud2> *cloud_sub_;
     message_filters::Subscriber<sensor_msgs::PointCloud2> *nbr_sub_;
-    message_filters::Subscriber<nav_msgs::Odometry>       *odom_filter_sub_;
+    message_filters::Subscriber<nav_msgs::Odometry> *odom_filter_sub_;
     typedef message_filters::sync_policies::ApproximateTime<sensor_msgs::PointCloud2,
                                                             sensor_msgs::PointCloud2,
                                                             nav_msgs::Odometry> MySyncPolicy;
-    // // boost::shared_ptr<message_filters::Synchronizer<MySyncPolicy>> sync_;
-    message_filters::Synchronizer<MySyncPolicy> *sync_;
+    message_filters::Synchronizer<MySyncPolicy> *sync_; // Message filters synchronizer
 
-    // callback Q4
-    ros::Publisher motion_pub_; // motion command pub
-    ros::Publisher gimbal_pub_; // motion gimbal pub
+    // Callback Q4
+    ros::Publisher motion_pub_; // Motion command pub
+    ros::Publisher gimbal_pub_; // Motion gimbal pub
 
-    // callback Q5
+    // Callback Q5
     ros::Publisher map_marker_pub_;
     ros::Publisher path_pub_;
 
-    mainbrain mm;
+    mainbrain mm; // Mainbrain object
 
-    // variable for static map
-    vector<Eigen::Vector3d> Nbr_point;
+    // Variable for static map
+    std::vector<Eigen::Vector3d> Nbr_point;
 
     bool map_initialise = false;
     bool communication_initialise = false;
-    // Callback function
 
-    void TaskCallback(const std_msgs::String msg)
+    // Callback function for task assignment
+    void TaskCallback(const std_msgs::String &msg)
     {
-
-        // cout<<nh_ptr->getNamespace()<<"Task begin"<<endl;
         if (pre_task == msg.data && pre_task != "")
         {
             map_initialise = true;
@@ -2946,9 +3016,10 @@ private:
         map_initialise = true;
     }
 
-    void ComCallback(const std_msgs::String msg)
+    // Callback function for communication
+    void ComCallback(const std_msgs::String &msg)
     {
-        if(!map_initialise)
+        if (!map_initialise)
         {
             return;
         }
@@ -2974,7 +3045,7 @@ private:
         {
             communication_pub_.publish(msg_map);
         }
-        list<string> msg_list;
+        std::list<std::string> msg_list;
         if (mm.get_state_set_msg_list(msg_list))
         {
             for (auto &str : msg_list)
@@ -2984,17 +3055,20 @@ private:
                 communication_pub_.publish(msg_list_item);
             }
         }
-
     }
 
+    // Callback function for odometry updates
     void OdomCallback(const nav_msgs::OdometryConstPtr &msg)
     {
-        if(!map_initialise)
+        if (!map_initialise)
         {
             Eigen::Vector3d initial_position = Eigen::Vector3d(msg->pose.pose.position.x, msg->pose.pose.position.y, msg->pose.pose.position.z);
             std_msgs::String init_position_msg;
-            init_position_msg.data="init_pos;"+nh_ptr->getNamespace()+";"+to_string(initial_position.x())+","+to_string(initial_position.y())+","+to_string(initial_position.z());
-            if(communication_initialise)
+            init_position_msg.data = "init_pos;" + nh_ptr->getNamespace() + ";" +
+                                     std::to_string(initial_position.x()) + "," +
+                                     std::to_string(initial_position.y()) + "," +
+                                     std::to_string(initial_position.z());
+            if (communication_initialise)
             {
                 communication_pub_.publish(init_position_msg);
             }
@@ -3006,9 +3080,10 @@ private:
         mm.update_position(my_position, R);
     }
 
+    // Callback function for gimbal updates
     void GimbalCallback(const geometry_msgs::TwistStamped &msg)
     {
-        if(!map_initialise)
+        if (!map_initialise)
         {
             return;
         }
@@ -3016,6 +3091,7 @@ private:
         mm.update_gimbal(position);
     }
 
+    // Timer callback for probing neighbours
     void TimerProbeNbrCB(const ros::TimerEvent &)
     {
         if (!serviceAvailable || !map_initialise)
@@ -3027,34 +3103,31 @@ private:
         {
             communication_pub_.publish(msg);
         }
-        else
-        {
-            return;
-        }
         return;
     }
+
+    // Timer callback for planning
     void TimerPlanCB(const ros::TimerEvent &)
     {
         if (!map_initialise)
         {
             return;
         }
-       ////yolo();
-        mm.replan();
-       ////yolo();
+        mm.replan(); // Call the replan function in mainbrain
         return;
     }
 
+    // Timer callback for command output
     void TimerCmdOutCB(const ros::TimerEvent &)
     {
         if (!map_initialise)
         {
             return;
         }
-        
+
         trajectory_msgs::MultiDOFJointTrajectory position_cmd;
         geometry_msgs::Twist gimbal_msg;
-        
+
         if (mm.get_cmd(position_cmd, gimbal_msg))
         {
             position_cmd.header.stamp = ros::Time::now();
@@ -3064,9 +3137,10 @@ private:
 
         return;
     }
+
+    // Timer callback for visualization
     void TimerVizCB(const ros::TimerEvent &)
     {
-
         if (!map_initialise)
         {
             return;
